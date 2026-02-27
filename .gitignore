@@ -1,0 +1,28 @@
+# Wallet
+Wallet Management App
+
+# Pytorch
+**/data/
+**/datasets/
+**/dataset/
+
+# test images
+**/test_images
+
+# model weights
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Python junk
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# environment
+*env
+
+# face regognition images
+**/faces
+

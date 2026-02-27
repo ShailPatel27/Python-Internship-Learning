@@ -1,0 +1,32 @@
+[
+    {
+        "id":1,
+        "name":"shail",
+        "age":21,
+        "gender":"male"
+    },
+    {
+        "id":2,
+        "name":"raj",
+        "age":20,
+        "gender":"male"
+    },
+    {
+        "id":3,
+        "name":"riya",
+        "age":20,
+        "gender":"female"
+    },
+    {
+        "id":4,
+        "name":"jeet",
+        "age":17,
+        "gender":"male"
+    },
+    {
+        "id":5,
+        "name":"khushi",
+        "age":16,
+        "gender":"female"
+    }
+]
