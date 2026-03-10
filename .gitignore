@@ -6,7 +6,8 @@ Wallet Management App
 **/datasets/
 **/dataset/
 
-# test images
+# test
+test*
 **/test_images
 
 # model weights
