@@ -15,7 +15,7 @@ Wallet Management App
 *.ckpt
 *.onnx
 
-# Python junk
+# python junk
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
