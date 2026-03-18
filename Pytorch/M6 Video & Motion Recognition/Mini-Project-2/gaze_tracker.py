@@ -1,183 +1,213 @@
+# gaze_tracker.py
+# Hybrid gaze tracking:
+#   Horizontal — head yaw + iris X offset (50/50)
+#   Vertical   — head pitch2 only (iris Y too noisy)
+
 import cv2
-import time
-import os
-import mediapipe as mp
+import numpy as np
 
-BASE_DIR           = os.path.dirname(os.path.abspath(__file__))
-BaseOptions        = mp.tasks.BaseOptions
-FaceLandmarker     = mp.tasks.vision.FaceLandmarker
-FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
-VisionRunningMode  = mp.tasks.vision.RunningMode
+WHITE  = (255, 255, 255)
+GREEN  = (0, 255, 0)
+YELLOW = (0, 255, 255)
 
-options = FaceLandmarkerOptions(
-    base_options = BaseOptions(model_asset_path=os.path.join(BASE_DIR, "face_landmarker.task")),
-    running_mode = VisionRunningMode.VIDEO,
-    num_faces    = 1
-)
+# Head pose landmarks
+NOSE_TIP = 4
+FOREHEAD = 10
+CHIN     = 152
+L_CHEEK  = 234
+R_CHEEK  = 454
 
-landmarker = FaceLandmarker.create_from_options(options)
+# Iris + eye landmarks
+L_IRIS       = 468
+L_EYE_LEFT   = 33
+L_EYE_RIGHT  = 133
+L_EYE_TOP    = 159
+L_EYE_BOTTOM = 145
+R_IRIS       = 473
+R_EYE_LEFT   = 362
+R_EYE_RIGHT  = 263
+R_EYE_TOP    = 386
+R_EYE_BOTTOM = 374
 
-# Iris landmark indices
-RIGHT_IRIS_CENTER = 468
-LEFT_IRIS_CENTER  = 473
+# Blend weights
+HEAD_WEIGHT = 0.5
+IRIS_WEIGHT = 0.5
 
-# Eye corner indices for head movement removal
-R_EYE_INNER = 362
-R_EYE_OUTER = 263
-L_EYE_INNER = 133
-L_EYE_OUTER = 33
-
-# Smoothing — averages last N gaze positions to reduce jitter
+# Smoothing
 SMOOTH_WINDOW = 8
-gaze_history  = []
+yaw_history   = []
+pitch_history = []
 
 
 def reset_smooth():
-    global gaze_history
-    gaze_history = []
+    global yaw_history, pitch_history
+    yaw_history   = []
+    pitch_history = []
+
+
+def get_head_pose(landmarks):
+    """
+    Returns (yaw, pitch2) from head geometry.
+    Yaw    — nose horizontal offset from face center / face width
+    Pitch2 — nose_to_chin / forehead_to_nose ratio
+    """
+    if landmarks is None:
+        return None, None
+
+    nose    = landmarks[NOSE_TIP]
+    fore    = landmarks[FOREHEAD]
+    chin    = landmarks[CHIN]
+    l_cheek = landmarks[L_CHEEK]
+    r_cheek = landmarks[R_CHEEK]
+
+    face_center_x = (l_cheek.x + r_cheek.x) / 2
+    face_width    =  r_cheek.x - l_cheek.x
+
+    if face_width < 1e-6:
+        return None, None
+
+    yaw = (nose.x - face_center_x) / face_width
+
+    nose_to_chin     = abs(nose.y - chin.y)
+    forehead_to_nose = abs(fore.y - nose.y)
+
+    if forehead_to_nose < 1e-6:
+        return float(yaw), None
+
+    pitch = nose_to_chin / forehead_to_nose
+
+    return float(yaw), float(pitch)
 
 
 def get_iris_offset(landmarks):
     """
-    Returns normalized iris offset relative to eye corners.
-
-    Raw iris position moves with both head AND eyes.
-    Eye corner position moves with head only.
-    Subtracting eye center from iris position removes head movement —
-    leaving only pure eyeball rotation.
-
-    offset_x > 0 → looking right
-    offset_x < 0 → looking left
-    offset_y > 0 → looking down
-    offset_y < 0 → looking up
+    Returns average iris X offset across both eyes.
+    Normalized to eye width, centered at 0.0.
+    Returns None if landmarks unavailable.
     """
-
-    r_iris  = landmarks[RIGHT_IRIS_CENTER]
-    l_iris  = landmarks[LEFT_IRIS_CENTER]
-
-    r_inner = landmarks[R_EYE_INNER]
-    r_outer = landmarks[R_EYE_OUTER]
-    l_inner = landmarks[L_EYE_INNER]
-    l_outer = landmarks[L_EYE_OUTER]
-
-    # Eye center = midpoint of inner and outer corners
-    r_eye_cx = (r_inner.x + r_outer.x) / 2
-    r_eye_cy = (r_inner.y + r_outer.y) / 2
-    l_eye_cx = (l_inner.x + l_outer.x) / 2
-    l_eye_cy = (l_inner.y + l_outer.y) / 2
-
-    # Eye width for normalization — removes scale differences
-    r_eye_w = abs(r_outer.x - r_inner.x)
-    l_eye_w = abs(l_outer.x - l_inner.x)
-
-    if r_eye_w < 1e-6 or l_eye_w < 1e-6:
+    if landmarks is None:
         return None
 
-    # Offset = iris minus eye center, normalized by eye width
-    r_offset_x = (r_iris.x - r_eye_cx) / r_eye_w
-    r_offset_y = (r_iris.y - r_eye_cy) / r_eye_w
-    l_offset_x = (l_iris.x - l_eye_cx) / l_eye_w
-    l_offset_y = (l_iris.y - l_eye_cy) / l_eye_w
+    def eye_x_offset(iris_idx, left_idx, right_idx):
+        iris  = landmarks[iris_idx]
+        left  = landmarks[left_idx]
+        right = landmarks[right_idx]
+        eye_w = abs(right.x - left.x)
+        if eye_w < 1e-6:
+            return None
+        return ((iris.x - left.x) / eye_w) - 0.5
 
-    # Average both eyes for stability
-    return ((r_offset_x + l_offset_x) / 2,
-            (r_offset_y + l_offset_y) / 2)
+    l_offset = eye_x_offset(L_IRIS, L_EYE_LEFT, L_EYE_RIGHT)
+    r_offset = eye_x_offset(R_IRIS, R_EYE_LEFT, R_EYE_RIGHT)
 
-
-def get_gaze_point(frame, calibration=None):
-    """
-    Returns smoothed screen position of gaze.
-
-    Without calibration → returns raw normalized offset as rough screen position.
-    With calibration    → maps offset to accurate screen coordinates.
-    Returns None if no face detected.
-    """
-
-    global gaze_history
-
-    h, w = frame.shape[:2]
-
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-    timestamp = int(time.time() * 1000)
-
-    result = landmarker.detect_for_video(mp_image, timestamp)
-
-    if not result.face_landmarks:
-        gaze_history = []
+    if l_offset is None and r_offset is None:
         return None
+    if l_offset is None:
+        return r_offset
+    if r_offset is None:
+        return l_offset
 
-    landmarks = result.face_landmarks[0]
-    offset    = get_iris_offset(landmarks)
+    return (l_offset + r_offset) / 2.0
 
-    if offset is None:
-        return None
 
-    if calibration is not None:
-        # Map offset to screen coordinates using calibration data
-        ox, oy = offset
-        sx = int(_interp(ox,
-                         calibration["offset_x_min"], calibration["offset_x_max"],
-                         0, w))
-        sy = int(_interp(oy,
-                         calibration["offset_y_min"], calibration["offset_y_max"],
-                         0, h))
+def get_gaze(landmarks, w, h, calibration=None):
+    """
+    Returns smoothed (yaw, pitch).
+    Yaw   — head yaw + iris X blended
+    Pitch — head pitch2 only
+    """
+    global yaw_history, pitch_history
+
+    head_yaw, pitch = get_head_pose(landmarks)
+    iris_x          = get_iris_offset(landmarks)
+
+    # Blend yaw — head + iris
+    if head_yaw is not None and iris_x is not None:
+        yaw = head_yaw * HEAD_WEIGHT + iris_x * IRIS_WEIGHT
+    elif head_yaw is not None:
+        yaw = head_yaw
     else:
-        # Fallback — rough mapping without calibration
-        sx = int(w * 0.5 + offset[0] * w * 3)
-        sy = int(h * 0.5 + offset[1] * h * 3)
+        yaw = None
 
-    sx = max(0, min(w, sx))
-    sy = max(0, min(h, sy))
+    # Smooth yaw
+    if yaw is not None:
+        yaw_history.append(yaw)
+        if len(yaw_history) > SMOOTH_WINDOW:
+            yaw_history.pop(0)
+        yaw = sum(yaw_history) / len(yaw_history)
 
-    # Smooth over history
-    gaze_history.append((sx, sy))
-    if len(gaze_history) > SMOOTH_WINDOW:
-        gaze_history.pop(0)
+    # Smooth pitch
+    if pitch is not None:
+        pitch_history.append(pitch)
+        if len(pitch_history) > SMOOTH_WINDOW:
+            pitch_history.pop(0)
+        pitch = sum(pitch_history) / len(pitch_history)
 
-    smoothed_x = int(sum(p[0] for p in gaze_history) / len(gaze_history))
-    smoothed_y = int(sum(p[1] for p in gaze_history) / len(gaze_history))
-
-    return (smoothed_x, smoothed_y)
-
-
-def _interp(value, in_min, in_max, out_min, out_max):
-    """Linear interpolation — maps value from input range to output range."""
-    if in_max == in_min:
-        return (out_min + out_max) / 2
-    return out_min + (value - in_min) / (in_max - in_min) * (out_max - out_min)
+    return yaw, pitch
 
 
-def get_corner_zone(gaze, frame_w, frame_h, zone_size=0.25):
-    """
-    Maps gaze point to one of four corner zones or None if not in any corner.
-    zone_size controls how large each corner zone is as a fraction of frame size.
-    Returns one of: 'TOP_LEFT', 'TOP_RIGHT', 'BOTTOM_LEFT', 'BOTTOM_RIGHT', None
-    """
-
-    if gaze is None:
+def get_corner_zone(yaw, pitch, calibration):
+    if yaw is None or pitch is None or calibration is None:
         return None
 
-    x, y   = gaze
-    zone_w = int(frame_w * zone_size)
-    zone_h = int(frame_h * zone_size)
+    yaw_left   = calibration.get("yaw_left")
+    yaw_right  = calibration.get("yaw_right")
+    pitch_up   = calibration.get("pitch_up")
+    pitch_down = calibration.get("pitch_down")
 
-    in_left   = x < zone_w
-    in_right  = x > frame_w - zone_w
-    in_top    = y < zone_h
-    in_bottom = y > frame_h - zone_h
+    if any(v is None for v in [yaw_left, yaw_right, pitch_up, pitch_down]):
+        return None
 
-    if in_top    and in_left:  return "TOP_LEFT"
-    if in_top    and in_right: return "TOP_RIGHT"
-    if in_bottom and in_left:  return "BOTTOM_LEFT"
-    if in_bottom and in_right: return "BOTTOM_RIGHT"
+    is_left  = yaw   < yaw_left
+    is_right = yaw   > yaw_right
+    is_up    = pitch > pitch_up    # pitch2 higher = looking up
+    is_down  = pitch < pitch_down  # pitch2 lower  = looking down
+
+    if is_left  and is_up:   return "TOP_LEFT"
+    if is_right and is_up:   return "TOP_RIGHT"
+    if is_left  and is_down: return "BOTTOM_LEFT"
+    if is_right and is_down: return "BOTTOM_RIGHT"
 
     return None
 
 
-def draw_gaze(frame, gaze):
-    """Draws a small dot at the estimated gaze position."""
-    if gaze is not None:
-        cv2.circle(frame, gaze, 8,  (0, 200, 255), -1)
-        cv2.circle(frame, gaze, 10, (255, 255, 255), 1)
-    return frame
+# gaze_tracker.py → draw_gaze_debug()
+def draw_gaze_debug(frame, yaw, pitch, calibration):
+    h, w = frame.shape[:2]
+
+    if yaw is not None:
+        cv2.putText(frame, f"Yaw:   {yaw:.3f}", (20, h - 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1)
+    if pitch is not None:
+        cv2.putText(frame, f"Pitch: {pitch:.3f}", (20, h - 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1)
+
+    zone = get_corner_zone(yaw, pitch, calibration)
+    if zone is not None:
+        cv2.putText(frame, f"Zone: {zone}", (20, h - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, GREEN, 1)
+
+    # Gaze circle
+    cx, cy = None, None
+    if yaw is not None and pitch is not None:
+        if calibration is not None:
+            cx = int(np.interp(yaw,
+                               [calibration["yaw_left"],  calibration["yaw_right"]],
+                               [0, w]))
+            cy = int(np.interp(pitch,
+                               [calibration["pitch_down"], calibration["pitch_up"]],
+                               [h, 0]))
+        else:
+            cx = int(w * 0.5 + yaw   * w * 2.0)
+            cy = int(h * 0.5 - (pitch - 1.2) * h * 2.0)
+
+        cx = max(20, min(w - 20, cx))
+        cy = max(20, min(h - 20, cy))
+
+        color = GREEN if zone is not None else YELLOW
+        cv2.circle(frame, (cx, cy), 18, color, 2)
+        cv2.circle(frame, (cx, cy), 4,  color, -1)
+        cv2.line(frame, (cx - 25, cy), (cx + 25, cy), color, 1)
+        cv2.line(frame, (cx, cy - 25), (cx, cy + 25), color, 1)
+
+    return frame, (cx, cy)  # ← return gaze point

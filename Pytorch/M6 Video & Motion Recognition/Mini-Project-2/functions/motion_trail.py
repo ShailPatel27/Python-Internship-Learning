@@ -5,11 +5,11 @@ from collections import deque
 
 # Constants
 TRAIL_LENGTH    = 60
-POINT_LIFETIME  = 2.0
+POINT_LIFETIME  = 3.0
 TRAIL_COLOR     = (255, 255, 255)   # white trail
-MAX_THICKNESS   = 8
-MIN_THICKNESS   = 1
-BG_DARKEN       = 0.3               # multiply frame by this → 70% darker
+MAX_THICKNESS   = 10
+MIN_THICKNESS   = 8
+BG_DARKEN       = 0.1               # multiply frame by this → 90% darker
 
 # Module state — each entry is (x, y, timestamp)
 trail = deque(maxlen=TRAIL_LENGTH)
@@ -46,7 +46,7 @@ def run(frame, fingertip=None):
         maxlen=TRAIL_LENGTH
     )
 
-    # Darken background by 70%
+    # Darken background by 90%
     frame = (frame.astype(np.float32) * BG_DARKEN).astype(np.uint8)
 
     trail_list = list(trail)

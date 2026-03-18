@@ -19,11 +19,14 @@ HAND_MENU_ITEMS = [
     {"label": "Exit",               "action": "EXIT"},
 ]
 
-hand_active_zone = None
-hand_dwell_start = None
-gaze_active_zone = None
-gaze_dwell_start = None
-hand_menu_open   = False
+# Separate dwell state for each input type
+hand_corner_active  = None
+hand_corner_start   = None
+hand_menu_active    = None
+hand_menu_start     = None
+gaze_active_zone    = None
+gaze_dwell_start    = None
+hand_menu_open      = False
 
 
 def get_dwell_progress(dwell_start, dwell_time):
@@ -75,15 +78,6 @@ def build_corner_coords(frame_w, frame_h, zone_size=0.25):
     }
 
 
-def build_trigger_coords(frame_w, frame_h):
-    margin = 15
-    box_w  = 100
-    box_h  = 45
-    x1     = frame_w - box_w - margin
-    y1     = margin
-    return (x1, y1, x1 + box_w, y1 + box_h)
-
-
 def build_hand_menu_coords(frame_w, frame_h):
     num_items = len(HAND_MENU_ITEMS)
     box_w, box_h, padding = 280, 60, 20
@@ -98,32 +92,40 @@ def build_hand_menu_coords(frame_w, frame_h):
     return zones
 
 
-def update_hand_zone(frame, fingertip, zones, dwell_time):
-    global hand_active_zone, hand_dwell_start
+# ── Hand corner zones ───────────────────────────────────────────────────
+
+def update_hand_corners(frame, fingertip, corner_coords):
+    global hand_corner_active, hand_corner_start
     triggered = None
 
-    for coords, label, action in zones:
+    for corner, zone_info in CORNER_ZONES.items():
+        coords = corner_coords[corner]
+        label  = zone_info["label"]
+        action = zone_info["action"]
+
         in_zone = is_inside(fingertip, coords)
         if in_zone:
-            if hand_active_zone != action:
-                hand_active_zone = action
-                hand_dwell_start = time.time()
-            progress = get_dwell_progress(hand_dwell_start, dwell_time)
+            if hand_corner_active != action:
+                hand_corner_active = action
+                hand_corner_start  = time.time()
+            progress = get_dwell_progress(hand_corner_start, HAND_DWELL_TIME)
             frame    = draw_zone(frame, coords, label, progress)
             if progress >= 1.0:
-                triggered        = action
-                hand_active_zone = None
-                hand_dwell_start = None
+                triggered          = action
+                hand_corner_active = None
+                hand_corner_start  = None
         else:
-            if hand_active_zone == action:
-                hand_active_zone = None
-                hand_dwell_start = None
+            if hand_corner_active == action:
+                hand_corner_active = None
+                hand_corner_start  = None
             frame = draw_zone(frame, coords, label, 0.0)
 
     return frame, triggered
 
 
-def update_gaze_zone(frame, gaze_zone, corner_coords):
+# ── Gaze corner zones ───────────────────────────────────────────────────
+
+def update_gaze_corners(frame, gaze_point, corner_coords):
     global gaze_active_zone, gaze_dwell_start
     triggered = None
 
@@ -131,7 +133,7 @@ def update_gaze_zone(frame, gaze_zone, corner_coords):
         coords  = corner_coords[corner]
         label   = zone_info["label"]
         action  = zone_info["action"]
-        in_zone = gaze_zone == corner
+        in_zone = is_inside(gaze_point, coords)  # ← use crosshair position!
 
         if in_zone:
             if gaze_active_zone != corner:
@@ -152,22 +154,57 @@ def update_gaze_zone(frame, gaze_zone, corner_coords):
     return frame, triggered
 
 
-def draw_gaze_corners(frame, gaze_zone):
-    h, w          = frame.shape[:2]
-    corner_coords = build_corner_coords(w, h)
-    return update_gaze_zone(frame, gaze_zone, corner_coords)
+# ── Hand menu ───────────────────────────────────────────────────────────
 
+def update_hand_menu(frame, fingertip):
+    global hand_menu_active, hand_menu_start
+    triggered = None
 
-def draw_trigger(frame, fingertip):
-    h, w   = frame.shape[:2]
-    coords = build_trigger_coords(w, h)
-    return update_hand_zone(frame, fingertip, [(coords, "MENU", "MENU")], HAND_DWELL_TIME)
+    h, w  = frame.shape[:2]
+    zones = build_hand_menu_coords(w, h)
 
-
-def draw_hand_menu(frame, fingertip):
-    h, w = frame.shape[:2]
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (w, h), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
-    zones = build_hand_menu_coords(w, h)
-    return update_hand_zone(frame, fingertip, zones, HAND_DWELL_TIME)
+
+    for coords, label, action in zones:
+        in_zone = is_inside(fingertip, coords)
+        if in_zone:
+            if hand_menu_active != action:
+                hand_menu_active = action
+                hand_menu_start  = time.time()
+            progress = get_dwell_progress(hand_menu_start, HAND_DWELL_TIME)
+            frame    = draw_zone(frame, coords, label, progress)
+            if progress >= 1.0:
+                triggered        = action
+                hand_menu_active = None
+                hand_menu_start  = None
+        else:
+            if hand_menu_active == action:
+                hand_menu_active = None
+                hand_menu_start  = None
+            frame = draw_zone(frame, coords, label, 0.0)
+
+    return frame, triggered
+
+
+# ── Main draw functions ─────────────────────────────────────────────────
+
+def draw_corners(frame, fingertip, gaze_point):
+    h, w          = frame.shape[:2]
+    corner_coords = build_corner_coords(w, h)
+
+    frame, hand_triggered = update_hand_corners(frame, fingertip, corner_coords)
+    frame, gaze_triggered = update_gaze_corners(frame, gaze_point, corner_coords)
+
+    return frame, hand_triggered or gaze_triggered
+
+
+def close_menu():
+    global hand_menu_open, hand_menu_active, hand_menu_start
+    global hand_corner_active, hand_corner_start
+    hand_menu_open     = False
+    hand_menu_active   = None
+    hand_menu_start    = None
+    hand_corner_active = None
+    hand_corner_start  = None

@@ -13,8 +13,8 @@ options = HandLandmarkerOptions(
     base_options      = BaseOptions(model_asset_path=os.path.join(BASE_DIR, "hand_landmarker.task")),
     running_mode      = VisionRunningMode.VIDEO,
     num_hands         = 1,
-    min_hand_detection_confidence = 0.7,
-    min_hand_presence_confidence  = 0.7,
+    min_hand_detection_confidence = 0.5,
+    min_hand_presence_confidence  = 0.5,
     min_tracking_confidence       = 0.7
 )
 
@@ -47,7 +47,7 @@ def is_pointing(landmarks):
     higher_than_middle = landmarks[INDEX_TIP].y < landmarks[MIDDLE_TIP].y
     higher_than_ring   = landmarks[INDEX_TIP].y < landmarks[RING_TIP].y
     higher_than_pinky  = landmarks[INDEX_TIP].y < landmarks[PINKY_TIP].y
-
+    # print(landmarks[INDEX_TIP])
     return index_up and higher_than_middle and higher_than_ring and higher_than_pinky
 
 

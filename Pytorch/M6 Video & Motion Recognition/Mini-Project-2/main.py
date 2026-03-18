@@ -41,6 +41,7 @@ def reset_functions():
     for module in FUNCTION_MAP.values():
         module.reset()
     gaze_tracker.reset_smooth()
+    menu.close_menu()
 
 
 # ── Main ────────────────────────────────────────────────────────────────
@@ -91,12 +92,13 @@ while True:
     frame = crop_to_fill(frame, w, h)
 
     # Always get inputs
+    # Always get inputs
     fingertip = hand_tracker.get_fingertip(frame)
-    gaze      = gaze_tracker.get_gaze_point(frame, calibration)
-    gaze_zone = gaze_tracker.get_corner_zone(gaze, w, h)
-
-    frame = hand_tracker.draw_fingertip(frame, fingertip)
-    frame = gaze_tracker.draw_gaze(frame, gaze)
+    landmarks, user_id, name, mesh_color, fingerprint = face_recognizer.process(frame, profiles)
+    yaw, pitch = gaze_tracker.get_gaze(landmarks, w, h, calibration)
+    gaze_zone  = gaze_tracker.get_corner_zone(yaw, pitch, calibration)
+    frame, gaze_point = gaze_tracker.draw_gaze_debug(frame, yaw, pitch, calibration)
+    frame      = hand_tracker.draw_fingertip(frame, fingertip)
 
     # Key input
     key = cv2.waitKey(1) & 0xFF
@@ -108,11 +110,10 @@ while True:
 
     if state == STATE_RECOGNIZING:
 
-        landmarks, user_id, name, mesh_color, fingerprint = face_recognizer.process(frame, profiles)
+        # landmarks, user_id, name, mesh_color, fingerprint already computed above
         frame = face_recognizer.draw_mesh(frame, landmarks, mesh_color)
 
         if user_id is not None:
-            # Known face — check if green flash is done
             if mesh_color is None:
                 current_user_id   = user_id
                 current_user_name = name
@@ -121,12 +122,10 @@ while True:
                 state             = STATE_WELCOME
 
         elif landmarks is not None and fingerprint is not None:
-            # Face detected but not recognized — prompt registration
             registrar = Registrar()
             state     = STATE_REGISTERING
 
         else:
-            # No face — show waiting prompt
             cv2.putText(frame, "Please face the camera", (w//2 - 200, h//2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, WHITE, 2)
 
@@ -152,17 +151,17 @@ while True:
 
     elif state == STATE_REGISTERING:
 
-        landmarks, _, _, mesh_color, _ = face_recognizer.process(frame, profiles)
+        # landmarks already computed above — just draw white mesh
         frame = face_recognizer.draw_mesh(frame, landmarks, (255, 255, 255))
         frame = registrar.update(frame, landmarks, fingertip, key)
 
         if registrar.done:
-            profiles    = face_recognizer.load_profiles()
+            profiles          = face_recognizer.load_profiles()
             current_user_id   = registrar.user_id
             current_user_name = registrar.name.strip()
-            calibrator  = Calibrator(current_user_id, w, h)
+            calibrator        = Calibrator(current_user_id, w, h)
             face_recognizer.reset_flash()
-            state       = STATE_CALIBRATING
+            state             = STATE_CALIBRATING
 
         elif registrar.cancelled:
             face_recognizer.reset_flash()
@@ -172,10 +171,7 @@ while True:
     # ── STATE: CALIBRATING ───────────────────────────────────────────
 
     elif state == STATE_CALIBRATING:
-
-        landmarks, _, _, _, _ = face_recognizer.process(frame, profiles)
-        frame = calibrator.update(frame, landmarks, fingertip, gaze)
-
+        frame = calibrator.update(frame, landmarks, fingertip, yaw, pitch)
         if calibrator.done:
             calibration = load_calibration(current_user_id)
             state       = STATE_RUNNING
@@ -183,73 +179,51 @@ while True:
 
     # ── STATE: RUNNING ───────────────────────────────────────────────
 
+    # main.py — replace STATE_RUNNING block entirely
     elif state == STATE_RUNNING:
 
-        if active_func is None:
-            # No function running — show menu navigation
-            frame, hand_triggered = menu.draw_trigger(frame, fingertip)
-            frame, gaze_triggered = menu.draw_gaze_corners(frame, gaze_zone)
-            triggered             = hand_triggered or gaze_triggered
+        frame, triggered = menu.draw_corners(frame, fingertip, gaze_point)
 
-            if triggered == "MENU":
-                pass   # hand menu opens next frame via draw_hand_menu
-
-            elif triggered == PROFILE_ACTION:
-                profile_mgr = ProfileManager(current_user_id, current_user_name)
-                state       = STATE_PROFILE
-
-            elif triggered in FUNCTION_MAP:
-                reset_functions()
-                active_func = triggered
-
-        else:
-            # Function is running
-            if active_func == "MOTION_TRAIL":
-                frame = motion_trail.run(frame, fingertip)
-            else:
-                frame = FUNCTION_MAP[active_func].run(frame)
-
-            # Back navigation
-            frame, hand_triggered = menu.draw_trigger(frame, fingertip)
-            frame, gaze_triggered = menu.draw_gaze_corners(frame, gaze_zone)
-            triggered             = hand_triggered or gaze_triggered
-
-            if triggered == "MENU":
-                reset_functions()
-                active_func = None
-            elif triggered in FUNCTION_MAP:
-                reset_functions()
-                active_func = triggered
-            elif triggered == PROFILE_ACTION:
-                reset_functions()
-                active_func = None
-                profile_mgr = ProfileManager(current_user_id, current_user_name)
-                state       = STATE_PROFILE
-
-        # Hand menu overlay if open
-        if hand_triggered == "MENU" or (active_func is None and hand_triggered == "MENU"):
-            frame, selected = menu.draw_hand_menu(frame, fingertip)
+        if menu.hand_menu_open:
+            frame, selected = menu.update_hand_menu(frame, fingertip)
             if selected == "EXIT":
                 break
             elif selected in FUNCTION_MAP:
                 reset_functions()
-                active_func = selected
+                active_func         = selected
+                menu.hand_menu_open = False
             elif selected == PROFILE_ACTION:
-                profile_mgr = ProfileManager(current_user_id, current_user_name)
-                state       = STATE_PROFILE
+                profile_mgr         = ProfileManager(current_user_id, current_user_name)
+                state               = STATE_PROFILE
+                menu.hand_menu_open = False
+
+        if triggered == "MENU":
+            menu.hand_menu_open = True
+        elif triggered == PROFILE_ACTION:
+            profile_mgr         = ProfileManager(current_user_id, current_user_name)
+            state               = STATE_PROFILE
+            menu.hand_menu_open = False
+        elif triggered in FUNCTION_MAP:
+            reset_functions()
+            active_func         = triggered
+            menu.hand_menu_open = False
+
+        if active_func is not None:
+            if active_func == "MOTION_TRAIL":
+                frame = motion_trail.run(frame, fingertip)
+            else:
+                frame = FUNCTION_MAP[active_func].run(frame)
 
 
     # ── STATE: PROFILE ───────────────────────────────────────────────
 
     elif state == STATE_PROFILE:
 
-        # Keep face recognition running for delete verification
-        landmarks, verified_id, _, mesh_color, _ = face_recognizer.process(frame, profiles)
-
+        # landmarks, verified_id, mesh_color already computed above
         frame = profile_mgr.update(
             frame, fingertip, key,
             landmarks=landmarks,
-            verified_id=verified_id,
+            verified_id=user_id,
             mesh_color=mesh_color
         )
 
@@ -262,7 +236,6 @@ while True:
             state             = STATE_RECOGNIZING
 
         elif profile_mgr.done:
-            # Sync name in case it was changed
             current_user_name = profile_mgr.name
             state             = STATE_RUNNING
 

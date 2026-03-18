@@ -235,7 +235,7 @@ class ProfileManager:
             self.verify_message_timer -= 1
 
         # Check if recognized user matches account owner
-        if verified_id == self.user_id and self.verify_message_timer == 0:
+        if verified_id == self.user_id and self.verify_message_timer == 0 and not self.deleted:
             self.verify_message       = "Identity confirmed. Deleting..."
             self.verify_message_timer = 45
             delete_profile(self.user_id)
