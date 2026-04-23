@@ -361,7 +361,7 @@ An advanced real-time AI security pipeline.
 
 ---
 
-# 🟣 M6 Video & Motion Recognition (Current / Next Major Phase)
+# 🟣 M6 Video & Motion Recognition
 
 This phase expands static vision → temporal intelligence.
 
